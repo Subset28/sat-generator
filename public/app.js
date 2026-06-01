@@ -3,6 +3,7 @@ import { createDemoRuntime } from './demo-runtime.js';
 const app = document.querySelector('#app');
 const APP_CONFIG = window.SAT_APP_CONFIG || {};
 const IS_DEMO = String(APP_CONFIG.mode || '').toLowerCase() === 'demo';
+const BUILD_ID = String(APP_CONFIG.buildId || 'dev');
 const DEMO_DATA_URL = APP_CONFIG.demoDataUrl || './data/demo-data.json';
 const SCORE_TABLES_URL = APP_CONFIG.scoreTablesUrl || './data/score-tables.json';
 const DESMOS_API_KEY = 'REDACTED_KEY';
@@ -1326,7 +1327,8 @@ async function getDemoRuntime() {
   if (!demoRuntimePromise) {
     demoRuntimePromise = createDemoRuntime({
       demoDataUrl: DEMO_DATA_URL,
-      scoreTablesUrl: SCORE_TABLES_URL
+      scoreTablesUrl: SCORE_TABLES_URL,
+      buildId: BUILD_ID
     }).then((runtime) => {
       state.demoRuntime = runtime;
       return runtime;

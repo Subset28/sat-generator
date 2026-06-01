@@ -25,16 +25,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Prepare Pages site
-        run: |
-          rm -rf dist
-          mkdir -p dist/data
-          cp index.html dist/index.html
-          cp .nojekyll dist/.nojekyll
-          cp -R public dist/public
-          cp -R vendor dist/vendor
-          cp data/demo-data.json dist/data/demo-data.json
-          cp data/score-tables.json dist/data/score-tables.json
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build Pages site
+        run: npm run build
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

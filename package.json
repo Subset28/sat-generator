@@ -4,9 +4,10 @@
   "version": "0.1.0",
   "type": "commonjs",
   "scripts": {
+    "build": "node scripts/build.cjs",
     "start": "node server/index.cjs",
     "dev": "node server/index.cjs",
     "sync": "node server/index.cjs --sync",
-    "check": "node --check server/index.cjs"
+    "check": "node --check server/index.cjs && node --check scripts/build.cjs"
   }
 }

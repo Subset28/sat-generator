@@ -21,6 +21,9 @@ const DATA_DIR = resolveRepoPath('data');
 const ASSET_ROOT = path.join(DATA_DIR, 'assets');
 const PUBLIC_DIR = resolveRepoPath('public');
 const VENDOR_DIR = resolveRepoPath('vendor');
+const DIST_DIR = resolveRepoPath('dist');
+const SERVE_DIST = process.env.SAT_SERVE_DIST === '1' || process.env.SAT_STATIC_BUILD === '1';
+const STATIC_DIR = SERVE_DIST ? DIST_DIR : PUBLIC_DIR;
 const SCORE_TABLES_PATH = resolveRepoPath('data', 'score-tables.json');
 const EQB_ORIGIN = 'https://satsuiteeducatorquestionbank.collegeboard.org';
 
@@ -765,28 +768,49 @@ async function handleApi(req, res, urlObj) {
   return false;
 }
 
+function staticCacheHeaders(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.html') {
+    return { 'cache-control': 'no-store' };
+  }
+  if (SERVE_DIST && ['.js', '.css', '.json', '.svg', '.png', '.jpg', '.jpeg', '.webp', '.pdf'].includes(ext)) {
+    return { 'cache-control': 'public, max-age=31536000, immutable' };
+  }
+  return { 'cache-control': 'no-store' };
+}
+
 function sendStaticFile(res, filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const mimeType = mimeTypes[ext] || 'application/octet-stream';
   const stream = fs.createReadStream(filePath);
-  stream.on('error', () => send(res, 404, 'Not found', { 'content-type': 'text/plain; charset=utf-8' }));
-  res.writeHead(200, { 'content-type': mimeType });
+  stream.on('error', () => send(res, 404, 'Not found', {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store'
+  }));
+  res.writeHead(200, {
+    'content-type': mimeType,
+    ...staticCacheHeaders(filePath)
+  });
   stream.pipe(res);
 }
 
 function handleStatic(req, res, pathname) {
   const target = pathname === '/' ? 'index.html' : pathname.slice(1);
-  const candidate = path.join(PUBLIC_DIR, target);
-  if (!candidate.startsWith(PUBLIC_DIR)) return false;
+  const candidate = path.join(STATIC_DIR, target);
+  if (!candidate.startsWith(STATIC_DIR)) return false;
   if (!fs.existsSync(candidate) || fs.statSync(candidate).isDirectory()) return false;
   sendStaticFile(res, candidate);
   return true;
 }
 
 function handleAsset(req, res, pathname) {
-  if (!pathname.startsWith('/assets/')) return false;
-  const candidate = path.join(DATA_DIR, pathname);
-  if (!candidate.startsWith(DATA_DIR)) return false;
+  if (!pathname.startsWith('/assets/') && !pathname.startsWith('/data/')) return false;
+  const root = SERVE_DIST ? path.join(DIST_DIR, 'data') : DATA_DIR;
+  const relative = pathname.startsWith('/assets/')
+    ? path.join('assets', pathname.slice('/assets/'.length))
+    : pathname.slice('/data/'.length);
+  const candidate = path.join(root, relative);
+  if (!candidate.startsWith(root)) return false;
   if (!fs.existsSync(candidate)) return false;
   sendStaticFile(res, candidate);
   return true;
@@ -794,8 +818,9 @@ function handleAsset(req, res, pathname) {
 
 function handleVendor(req, res, pathname) {
   if (!pathname.startsWith('/vendor/')) return false;
-  const candidate = path.join(VENDOR_DIR, pathname.slice('/vendor/'.length));
-  if (!candidate.startsWith(VENDOR_DIR)) return false;
+  const vendorRoot = SERVE_DIST ? path.join(DIST_DIR, 'vendor') : VENDOR_DIR;
+  const candidate = path.join(vendorRoot, pathname.slice('/vendor/'.length));
+  if (!candidate.startsWith(vendorRoot)) return false;
   if (!fs.existsSync(candidate) || fs.statSync(candidate).isDirectory()) return false;
   sendStaticFile(res, candidate);
   return true;
@@ -810,7 +835,10 @@ async function main() {
       if (handleAsset(req, res, urlObj.pathname)) return;
       if (handleVendor(req, res, urlObj.pathname)) return;
       if (handleStatic(req, res, urlObj.pathname)) return;
-      send(res, 404, 'Not found', { 'content-type': 'text/plain; charset=utf-8' });
+      send(res, 404, 'Not found', {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store'
+      });
     } catch (error) {
       sendJson(res, 500, { error: error.stack || error.message || String(error) });
     }

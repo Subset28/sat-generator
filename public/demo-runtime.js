@@ -1,4 +1,4 @@
-const STORAGE_KEY = 'sat-generator-demo-state-v1';
+const STORAGE_KEY_PREFIX = 'sat-generator-demo-state';
 
 function nowIso() {
   return new Date().toISOString();
@@ -334,14 +334,16 @@ function parseUrl(path) {
 
 export async function createDemoRuntime({
   demoDataUrl,
-  scoreTablesUrl
+  scoreTablesUrl,
+  buildId = 'dev'
 } = {}) {
+  const storageKey = `${STORAGE_KEY_PREFIX}:${String(buildId || 'dev')}:v1`;
   const [demoData, scoreTableData] = await Promise.all([
     fetchJson(demoDataUrl || './data/demo-data.json'),
     fetchJson(scoreTablesUrl || './data/score-tables.json')
   ]);
-  const generatedSets = Array.isArray(loadJsonStorage(STORAGE_KEY, []))
-    ? loadJsonStorage(STORAGE_KEY, [])
+  const generatedSets = Array.isArray(loadJsonStorage(storageKey, []))
+    ? loadJsonStorage(storageKey, [])
     : [];
   const questionIndex = buildQuestionIndex(generatedSets);
   const questions = Array.isArray(demoData.questions) ? demoData.questions : [];
@@ -354,7 +356,7 @@ export async function createDemoRuntime({
   };
 
   function persist() {
-    saveJsonStorage(STORAGE_KEY, generatedSets);
+    saveJsonStorage(storageKey, generatedSets);
   }
 
   function seenCount(externalId) {
@@ -397,7 +399,8 @@ export async function createDemoRuntime({
   function generateSet(filters = {}) {
     const currentRows = questions.map((row) => decorate(row));
     const mode = String(filters.mode || 'practice');
-    const selected = mode === 'fulltest'
+    const isFullTest = mode === 'fulltest' || mode === 'full-test';
+    const selected = isFullTest
       ? buildFullTest(currentRows, filters, seenCount)
       : buildPracticeSet(currentRows, filters, seenCount);
     const items = selected.items.map((row, index) => ({
@@ -407,11 +410,11 @@ export async function createDemoRuntime({
     }));
     const set = {
       id: `demo-${Date.now()}`,
-      name: mode === 'fulltest' ? 'Demo full test' : 'Demo practice set',
+      name: isFullTest ? 'Demo full test' : 'Demo practice set',
       mode,
       seed: filters.seed || 'sat-generator-demo',
       config: { ...filters },
-      score: mode === 'fulltest'
+      score: isFullTest
         ? scoreSet(items, scoreTables, { showEstimate: true })
         : {
             raw_total: items.length,
