@@ -1,0 +1,13 @@
+data/*.sqlite
+data/*.sqlite-journal
+data/*.db
+data/*.tmp
+data/*.png
+data/*.pdf
+data/*.csv
+data/*.log
+exports/
+node_modules/
+*.log
+.DS_Store
+data/test-export.*

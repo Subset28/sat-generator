@@ -1,0 +1,12 @@
+{
+  "name": "sat-generator",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.cjs",
+    "dev": "node server/index.cjs",
+    "sync": "node server/index.cjs --sync",
+    "check": "node --check server/index.cjs"
+  }
+}
