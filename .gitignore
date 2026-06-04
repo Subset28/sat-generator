@@ -12,3 +12,5 @@ node_modules/
 *.log
 .DS_Store
 data/test-export.*
+.codegraph/
+nul

@@ -14,8 +14,9 @@ const { fetchLookup, fetchQuestions, fetchQuestionBatch, fetchStateStandards, cr
 const { buildPracticeSet, buildFullTest, scoreSet } = require('./lib/generator.cjs');
 const { renderPdfBuffer, renderPrintableHtml, toCsv } = require('./lib/export.cjs');
 
+const IS_PROD = process.env.NODE_ENV === 'production';
 const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || (IS_PROD ? '0.0.0.0' : '127.0.0.1');
 const DEFAULT_EQB_COOKIE = process.env.EQB_COOKIE || '';
 const DATA_DIR = resolveRepoPath('data');
 const ASSET_ROOT = path.join(DATA_DIR, 'assets');
@@ -49,8 +50,14 @@ function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'same-origin'
+};
+
 function send(res, statusCode, body, headers = {}) {
-  res.writeHead(statusCode, headers);
+  res.writeHead(statusCode, { ...SECURITY_HEADERS, ...headers });
   res.end(body);
 }
 
@@ -60,10 +67,19 @@ function sendJson(res, statusCode, data) {
   });
 }
 
-function parseBody(req) {
+function parseBody(req, maxBytes = 1_048_576) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        req.destroy();
+        reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw) {
@@ -425,6 +441,95 @@ async function processQuestionContent(content, cookie = '') {
   };
 }
 
+async function hydrateQuestionGroup(group, lookup, cookie = '', checkpointKey = `adhoc:${group.assessmentId}:${group.testId}`) {
+  const liveSets = {
+    '1': new Set(lookup.readingLiveItems || []),
+    '2': new Set(lookup.mathLiveItems || [])
+  };
+  const limiter = createLimiter(3, 120);
+  let itemIndex = 0;
+
+  for (const domain of group.domains || []) {
+    const params = {
+      asmtEventId: Number(group.assessmentId),
+      test: Number(group.testId),
+      domain: domain.primaryClassCd
+    };
+    const rows = await limiter(() => fetchQuestions(params, cookie));
+    const rowsByExternalId = new Map();
+    for (const row of rows) {
+      rowsByExternalId.set(row.external_id, row);
+    }
+
+    for (let i = 0; i < rows.length; i += 20) {
+      const batch = rows.slice(i, i + 20);
+      const externalIds = batch.map((row) => row.external_id);
+      let contentItems;
+      try {
+        contentItems = await limiter(() => fetchQuestionBatch(externalIds, cookie));
+      } catch {
+        contentItems = await Promise.all(externalIds.map((externalId) => limiter(() => fetchQuestionBatch([externalId], cookie).then((items) => items[0]))));
+      }
+      for (const content of contentItems || []) {
+        const base = rowsByExternalId.get(content.externalid);
+        if (!base) continue;
+        const processed = await processQuestionContent(content, cookie);
+        const questionBase = store.upsertQuestionBase({
+          question_id: base.questionId,
+          external_id: base.external_id,
+          uId: base.uId,
+          program: base.program,
+          assessment_id: group.assessmentId,
+          assessment_text: group.assessmentText,
+          test_id: group.testId,
+          test_text: group.testText,
+          primary_class_cd: base.primary_class_cd,
+          primary_class_cd_desc: base.primary_class_cd_desc,
+          skill_cd: base.skill_cd,
+          skill_desc: base.skill_desc,
+          difficulty: base.difficulty,
+          score_band_range_cd: base.score_band_range_cd,
+          is_active: liveSets[group.testId]?.has(base.external_id) || false,
+          question_order: itemIndex += 1,
+          content_hash: processed.content_hash,
+          search_text: processed.search_text,
+          rationale_text: processed.rationale_text
+        }, checkpointKey);
+        const versionRow = store.upsertQuestionVersion(questionBase, processed);
+        for (const assetRef of processed.assetRefs || []) {
+          if (!assetRef.assetId) continue;
+          store.linkQuestionAsset(versionRow.id, assetRef.assetId, 'image', assetRef.originalSrc);
+        }
+      }
+    }
+  }
+
+  store.persistIfDirty();
+}
+
+async function ensureQuestionSlicesLoaded(targets = [], cookie = '') {
+  await loadStore();
+  const effectiveCookie = cookie || DEFAULT_EQB_COOKIE;
+  const lookup = await fetchLookup(effectiveCookie);
+  store.upsertLookup(lookup);
+  const groups = domainGroupsFromLookup(lookup);
+  const normalizedTargets = targets
+    .filter((target) => target?.assessmentId && target?.testId)
+    .map((target) => ({ assessmentId: String(target.assessmentId), testId: String(target.testId) }));
+
+  for (const target of normalizedTargets) {
+    const existing = store.listQuestions({
+      assessment: target.assessmentId,
+      test: target.testId,
+      excludeActive: false
+    });
+    if (existing.length > 0) continue;
+    const group = groups.find((entry) => String(entry.assessmentId) === target.assessmentId && String(entry.testId) === target.testId);
+    if (!group) continue;
+    await hydrateQuestionGroup(group, lookup, effectiveCookie, `adhoc:${group.assessmentId}:${group.testId}`);
+  }
+}
+
 async function syncEqb(cookie = '', resume = true) {
   if (syncPromise) return syncPromise;
   syncPromise = (async () => {
@@ -456,72 +561,16 @@ async function syncEqb(cookie = '', resume = true) {
     };
     pushSyncEvent('Lookup loaded', 'Reference data and live item lists cached.');
 
-    const liveSets = {
-      '1': new Set(lookup.readingLiveItems || []),
-      '2': new Set(lookup.mathLiveItems || [])
-    };
-
-    const limiter = createLimiter(3, 120);
-
     for (const group of groups) {
       for (const domain of group.domains || []) {
         const checkpointKey = `${group.assessmentId}:${group.testId}:${domain.primaryClassCd}`;
         if (resume && checkpoint[checkpointKey] === 'done') continue;
 
         pushSyncEvent('Fetching questions', `${group.assessmentText} • ${group.testText} • ${domain.text}`);
-        const params = {
-          asmtEventId: Number(group.assessmentId),
-          test: Number(group.testId),
-          domain: domain.primaryClassCd
-        };
-        const rows = await limiter(() => fetchQuestions(params, effectiveCookie));
-        let itemIndex = 0;
-        const rowsByExternalId = new Map();
-        for (const row of rows) {
-          rowsByExternalId.set(row.external_id, row);
-        }
-
-        for (let i = 0; i < rows.length; i += 20) {
-          const batch = rows.slice(i, i + 20);
-          const externalIds = batch.map((row) => row.external_id);
-          let contentItems;
-          try {
-            contentItems = await limiter(() => fetchQuestionBatch(externalIds, effectiveCookie));
-          } catch {
-            contentItems = await Promise.all(externalIds.map((externalId) => limiter(() => fetchQuestionBatch([externalId], effectiveCookie).then((items) => items[0]))));
-          }
-          for (const content of contentItems || []) {
-            const base = rowsByExternalId.get(content.externalid);
-            if (!base) continue;
-            const processed = await processQuestionContent(content, effectiveCookie);
-            const questionBase = store.upsertQuestionBase({
-              question_id: base.questionId,
-              external_id: base.external_id,
-              uId: base.uId,
-              program: base.program,
-              assessment_id: group.assessmentId,
-              assessment_text: group.assessmentText,
-              test_id: group.testId,
-              test_text: group.testText,
-              primary_class_cd: base.primary_class_cd,
-              primary_class_cd_desc: base.primary_class_cd_desc,
-              skill_cd: base.skill_cd,
-              skill_desc: base.skill_desc,
-              difficulty: base.difficulty,
-              score_band_range_cd: base.score_band_range_cd,
-              is_active: liveSets[group.testId]?.has(base.external_id) || false,
-              question_order: itemIndex += 1,
-              content_hash: processed.content_hash,
-              search_text: processed.search_text,
-              rationale_text: processed.rationale_text
-            }, checkpointKey);
-            const versionRow = store.upsertQuestionVersion(questionBase, processed);
-            for (const assetRef of processed.assetRefs || []) {
-              if (!assetRef.assetId) continue;
-              store.linkQuestionAsset(versionRow.id, assetRef.assetId, 'image', assetRef.originalSrc);
-            }
-          }
-        }
+        await hydrateQuestionGroup({
+          ...group,
+          domains: [domain]
+        }, lookup, effectiveCookie, checkpointKey);
 
         checkpoint[checkpointKey] = 'done';
         store.updateSyncRun(syncState.runId, {
@@ -540,7 +589,7 @@ async function syncEqb(cookie = '', resume = true) {
         const checkpointKey = `standards:99:${state.stateCd}`;
         if (resume && checkpoint[checkpointKey] === 'done') continue;
         pushSyncEvent('Fetching standards', `${state.name} (${state.stateCd})`);
-        const standards = await limiter(() => fetchStateStandards(state.stateCd, 99, effectiveCookie));
+        const standards = await createLimiter(3, 120)(() => fetchStateStandards(state.stateCd, 99, effectiveCookie));
         store.upsertStateStandards(state.stateCd, 99, standards);
         checkpoint[checkpointKey] = 'done';
         store.updateSyncRun(syncState.runId, {
@@ -607,8 +656,18 @@ function applyQuestionTransforms(question) {
   };
 }
 
+function hasFullTestCounts(summary, config) {
+  return Number(summary?.rwCount || 0) >= Number(config?.fullTestCountRw || 54)
+    && Number(summary?.mathCount || 0) >= Number(config?.fullTestCountMath || 44);
+}
+
 async function handleApi(req, res, urlObj) {
   const { pathname, searchParams } = urlObj;
+  if (req.method === 'GET' && pathname === '/healthz') {
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+
   if (req.method === 'GET' && pathname === '/api/meta') {
     await loadStore();
     sendJson(res, 200, {
@@ -649,7 +708,12 @@ async function handleApi(req, res, urlObj) {
       skill: searchParams.get('skill') || ''
     };
     const limit = Number(searchParams.get('limit') || 24);
-    const rows = store.listQuestions(filters).slice(0, limit);
+    let rows = store.listQuestions(filters);
+    if (rows.length === 0 && filters.assessment && filters.test) {
+      await ensureQuestionSlicesLoaded([{ assessmentId: filters.assessment, testId: filters.test }]);
+      rows = store.listQuestions(filters);
+    }
+    rows = rows.slice(0, limit);
     sendJson(res, 200, rows.map(applyQuestionTransforms));
     return true;
   }
@@ -678,6 +742,14 @@ async function handleApi(req, res, urlObj) {
     const body = await parseBody(req);
     const seed = body.seed || 'sat-generator';
     const mode = body.mode || 'practice';
+    if (mode === 'full-test' && body.assessment) {
+      await ensureQuestionSlicesLoaded([
+        { assessmentId: body.assessment, testId: '1' },
+        { assessmentId: body.assessment, testId: '2' }
+      ]);
+    } else if (body.assessment && body.test) {
+      await ensureQuestionSlicesLoaded([{ assessmentId: body.assessment, testId: body.test }]);
+    }
     const sourceFilters = mode === 'full-test'
       ? {
           ...body,
@@ -685,14 +757,30 @@ async function handleApi(req, res, urlObj) {
           domains: []
         }
       : body;
-    const allQuestions = store.listQuestions(sourceFilters);
-    const output = mode === 'full-test'
+    let allQuestions = store.listQuestions(sourceFilters);
+    let output = mode === 'full-test'
       ? buildFullTest(allQuestions, body)
       : buildPracticeSet(allQuestions, body);
+    let effectiveConfig = body;
+    if (mode === 'full-test' && body.excludeActive && !hasFullTestCounts(output.summary, body)) {
+      effectiveConfig = {
+        ...body,
+        excludeActive: false
+      };
+      const relaxedSourceFilters = {
+        ...sourceFilters,
+        excludeActive: false
+      };
+      allQuestions = store.listQuestions(relaxedSourceFilters);
+      output = buildFullTest(allQuestions, effectiveConfig);
+      output.summary = {
+        ...(output.summary || {}),
+        usedActiveFallback: true
+      };
+    }
     const score = scoreSet(output.items, getCurrentScoreTables(), {
       showEstimate: mode === 'full-test'
-        && Number(output.summary?.rwCount || 0) >= Number(body.fullTestCountRw || 54)
-        && Number(output.summary?.mathCount || 0) >= Number(body.fullTestCountMath || 44)
+        && hasFullTestCounts(output.summary, effectiveConfig)
     });
     const setId = `set_${sha256Hex(`${seed}:${mode}:${Date.now()}`).slice(0, 12)}`;
     const set = {
@@ -700,7 +788,7 @@ async function handleApi(req, res, urlObj) {
       name: body.name || (mode === 'full-test' ? 'Full SAT test' : 'Practice set'),
       mode,
       seed,
-      config: body,
+      config: effectiveConfig,
       summary: output.summary,
       score,
       items: output.items.map(applyQuestionTransforms),
@@ -788,6 +876,7 @@ function sendStaticFile(res, filePath) {
     'cache-control': 'no-store'
   }));
   res.writeHead(200, {
+    ...SECURITY_HEADERS,
     'content-type': mimeType,
     ...staticCacheHeaders(filePath)
   });
@@ -840,13 +929,30 @@ async function main() {
         'cache-control': 'no-store'
       });
     } catch (error) {
-      sendJson(res, 500, { error: error.stack || error.message || String(error) });
+      console.error('[request error]', req.method, req.url, error);
+      const statusCode = error.statusCode || 500;
+      const msg = IS_PROD ? 'Internal server error' : (error.stack || error.message || String(error));
+      sendJson(res, statusCode, { error: msg });
     }
   });
 
   server.listen(PORT, HOST, () => {
     console.log(`SAT Generator running on http://${HOST}:${PORT}`);
   });
+
+  function shutdown(signal) {
+    console.log(`${signal} received — shutting down`);
+    server.close(() => {
+      if (store) store.save();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.error('Forced shutdown after timeout');
+      process.exit(1);
+    }, 10_000).unref();
+  }
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 
   if (process.argv.includes('--sync')) {
     try {

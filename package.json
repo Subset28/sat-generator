@@ -8,6 +8,8 @@
     "start": "node server/index.cjs",
     "dev": "node server/index.cjs",
     "sync": "node server/index.cjs --sync",
-    "check": "node --check server/index.cjs && node --check scripts/build.cjs"
+    "check": "node --check server/index.cjs && node --check scripts/build.cjs",
+    "export-demo": "node scripts/export-demo-data.cjs",
+    "share": "set HOST=0.0.0.0 && node server/index.cjs"
   }
 }

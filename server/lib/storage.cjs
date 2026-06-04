@@ -100,7 +100,7 @@ async function initStore() {
   } else {
     db = new SQLLib.Database();
   }
-  db.exec('PRAGMA foreign_keys = ON;');
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -8000;');
   await applyMigrations(db);
   const store = createStore(db, dbPath);
   return store;
@@ -627,6 +627,17 @@ function createStore(db, dbPath) {
     return {
       lookupData: getLookups(),
       stateOfferings: queryAll(db, 'SELECT stateCd, name FROM state_offerings ORDER BY name ASC'),
+      availableQuestionSlices: queryAll(db, `
+        SELECT
+          assessment_id,
+          assessment_text,
+          test_id,
+          test_text,
+          COUNT(*) AS count
+        FROM questions
+        GROUP BY assessment_id, assessment_text, test_id, test_text
+        ORDER BY assessment_id ASC, test_id ASC
+      `),
       counts: {
         questions: getQuestionCount(),
         assets: getAssetCount(),

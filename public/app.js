@@ -16,7 +16,7 @@ const state = {
   testAttempt: null,
   demoRuntime: null,
   scoreTables: null,
-  tab: 'library',
+  tab: 'builder',
   sync: null,
   uiNotice: '',
   ui: {
@@ -1599,26 +1599,34 @@ function render() {
         <div class="brand">
           <div class="brand-mark"></div>
           <div>
-            <h1>SAT Generator</h1>
-            <p>${IS_DEMO ? 'Static Pages demo with bundled sample questions.' : 'EQB sync, filtered practice sets, full tests, and offline review.'}</p>
+            <h1>SAT Practice</h1>
+            <p>${IS_DEMO
+              ? `${(meta?.counts?.questions || 0).toLocaleString()} Digital SAT questions ready.`
+              : `${(meta?.counts?.questions || 0).toLocaleString()} questions${isBusy('refresh') ? ' — loading...' : '.'}`
+            }</p>
           </div>
         </div>
         <div class="topbar-actions">
-          <div class="badge">Status: <strong>${esc(loadingLabel)}</strong></div>
-          <button class="btn ${isBusy('refresh') ? 'loading' : ''}" data-action="refresh" ${isAnyBusy() ? 'disabled' : ''}>${isBusy('refresh') ? 'Refreshing...' : 'Refresh'}</button>
-          <button class="btn primary ${isBusy('sync') ? 'loading' : ''}" data-action="sync" ${isAnyBusy() ? 'disabled' : ''}>${isBusy('sync') ? 'Syncing...' : (IS_DEMO ? 'Reload Demo' : 'Sync EQB')}</button>
-          <button class="btn" data-action="export-json" ${isAnyBusy() ? 'disabled' : ''}>Export JSON</button>
-          <button class="btn" data-action="export-csv" ${isAnyBusy() ? 'disabled' : ''}>Export CSV</button>
-          <button class="btn" data-action="export-pdf" ${isAnyBusy() ? 'disabled' : ''}>Export PDF</button>
+          ${state.tab === 'exports' ? `
+            <button class="btn" data-action="export-json" ${isAnyBusy() ? 'disabled' : ''}>Export JSON</button>
+            <button class="btn" data-action="export-csv" ${isAnyBusy() ? 'disabled' : ''}>Export CSV</button>
+            <button class="btn" data-action="export-pdf" ${isAnyBusy() ? 'disabled' : ''}>Export PDF</button>
+          ` : ''}
+          ${!IS_DEMO && state.tab !== 'exports' ? `
+            <div class="badge ${sync.status === 'failed' ? 'badge-error' : ''}">
+              ${esc(sync.status === 'running' ? `Syncing ${sync.progress?.done ?? 0}/${sync.progress?.total ?? 0}` : sync.status === 'failed' ? 'Sync failed' : sync.status === 'complete' ? `${(meta?.counts?.questions || 0).toLocaleString()} questions` : 'Not synced')}
+            </div>
+            <button class="btn primary ${isBusy('sync') ? 'loading' : ''}" data-action="sync" ${isAnyBusy() ? 'disabled' : ''}>${isBusy('sync') ? 'Syncing...' : 'Sync EQB'}</button>
+          ` : ''}
         </div>
       </section>
-      ${isAnyBusy() ? `
+      ${(isBusy('generate') || isBusy('sync')) ? `
         <div class="app-loading-overlay" aria-live="polite" aria-busy="true">
           <div class="loading-card">
             <div class="loading-spinner" aria-hidden="true"></div>
             <div class="loading-copy">
               <strong>${esc(currentLoadingMessage())}</strong>
-              <span>Please wait. The app is still working.</span>
+              <span>Please wait.</span>
             </div>
           </div>
         </div>
@@ -2105,7 +2113,7 @@ function renderPracticeRunner() {
           ${renderPracticeProgress(currentIndex)}
         </div>
 
-        <main class="sat-question">
+        <main class="sat-question ${current?.stimulus_html ? 'sat-question-two-col' : ''}">
           <div class="sat-question-strip">
             <div class="sat-question-number">${esc(currentIndex + 1)}</div>
             <button class="sat-review" data-action="practice-toggle-review">
@@ -2115,22 +2123,40 @@ function renderPracticeRunner() {
           </div>
 
           <div class="sat-question-body">
-            <div class="sat-question-text rich">${current?.rendered_prompt_html || current?.prompt_html || current?.stimulus_html || current?.stem_html || ''}</div>
-
-            <div class="choice-list sat-choice-list">
-              ${(current?.answerOptions || []).map((choice, index) => renderPracticeChoice(current, choice, index, response, correctLetters)).join('')}
-            </div>
-
-            ${reviewVisible && response.submitted ? html`
-              <div class="sat-feedback">
-                <div class="notice sat-feedback-box">
-                  ${selectedIsCorrect
-                    ? `Correct. ${current?.rationale_html ? 'Review the explanation below.' : 'Move to the next question when ready.'}`
-                    : `Submitted ${response.selected || 'blank'}. The correct answer is ${correctLetters.join(', ') || 'not available'}.`}
+            ${current?.stimulus_html ? `
+              <div class="sat-passage rich">${current.stimulus_html}</div>
+              <div class="sat-question-right">
+                <div class="sat-question-text rich">${current.stem_html || ''}</div>
+                <div class="choice-list sat-choice-list">
+                  ${(current?.answerOptions || []).map((choice, index) => renderPracticeChoice(current, choice, index, response, correctLetters)).join('')}
                 </div>
-                ${current?.rationale_html ? `<div class="notice sat-rationale">${current.rendered_rationale_html || current.rationale_html}</div>` : ''}
+                ${reviewVisible && response.submitted ? html`
+                  <div class="sat-feedback">
+                    <div class="notice sat-feedback-box ${selectedIsCorrect ? 'correct' : 'incorrect'}">
+                      ${selectedIsCorrect
+                        ? `<strong>Correct!</strong>${current?.rationale_html ? ' See explanation below.' : ''}`
+                        : `<strong>Incorrect.</strong> You chose ${esc(response.selected || '—')}. Correct answer: <strong>${correctLetters.join(', ') || '?'}</strong>`}
+                    </div>
+                    ${current?.rationale_html ? `<div class="sat-rationale rich">${current.rendered_rationale_html || current.rationale_html}</div>` : ''}
+                  </div>
+                ` : ''}
               </div>
-            ` : ''}
+            ` : `
+              <div class="sat-question-text rich">${current?.rendered_prompt_html || current?.stem_html || ''}</div>
+              <div class="choice-list sat-choice-list">
+                ${(current?.answerOptions || []).map((choice, index) => renderPracticeChoice(current, choice, index, response, correctLetters)).join('')}
+              </div>
+              ${reviewVisible && response.submitted ? html`
+                <div class="sat-feedback">
+                  <div class="notice sat-feedback-box ${selectedIsCorrect ? 'correct' : 'incorrect'}">
+                    ${selectedIsCorrect
+                      ? `<strong>Correct!</strong>${current?.rationale_html ? ' See explanation below.' : ''}`
+                      : `<strong>Incorrect.</strong> You chose ${esc(response.selected || '—')}. Correct answer: <strong>${correctLetters.join(', ') || '?'}</strong>`}
+                  </div>
+                  ${current?.rationale_html ? `<div class="sat-rationale rich">${current.rendered_rationale_html || current.rationale_html}</div>` : ''}
+                </div>
+              ` : ''}
+            `}
           </div>
         </main>
 
