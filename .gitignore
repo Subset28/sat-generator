@@ -14,3 +14,4 @@ node_modules/
 data/test-export.*
 .codegraph/
 nul
+public/config.js

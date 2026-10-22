@@ -6,8 +6,8 @@ const IS_DEMO = String(APP_CONFIG.mode || '').toLowerCase() === 'demo';
 const BUILD_ID = String(APP_CONFIG.buildId || 'dev');
 const DEMO_DATA_URL = APP_CONFIG.demoDataUrl || './data/demo-data.json';
 const SCORE_TABLES_URL = APP_CONFIG.scoreTablesUrl || './data/score-tables.json';
-const DESMOS_API_KEY = 'REDACTED_KEY';
-const DESMOS_SCRIPT_SRC = `https://www.desmos.com/api/v1.12/calculator.js?apiKey=${DESMOS_API_KEY}`;
+const DESMOS_API_KEY = window.SAT_CONFIG?.desmosApiKey || ''; // set in public/config.js (not committed)
+const DESMOS_SCRIPT_SRC = `https://www.desmos.com/api/v1.12/calculator.js?apiKey=${encodeURIComponent(DESMOS_API_KEY)}`;
 
 const state = {
   meta: null,
